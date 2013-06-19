@@ -78,17 +78,58 @@ class MockMemcached(object):
         if self._get_delay > 0:
             time.sleep(self._get_delay)
         if key in self._dict:
-            val = self._dict[key]
-            command = 'VALUE %s 0 %d\r\n%s\r\n' % (key, len(val), val)
+            val, flags, cas = self._dict[key]
+            command = 'VALUE %s %d %d\r\n%s\r\n' % (key, flags, len(val), val)
             self._socket.sendall(command)
         self._socket.sendall('END\r\n')
 
-    def _handle_set(self, key, length):
+    def _handle_gets(self, key):
+        # req  - gets <key>\r\n
+        # resp - VALUE <key> <flags> <bytes> <cas unique>\r\n
+        #        <data block>\r\n (if exists)
+        #        END\r\n
+        if self._get_delay > 0:
+            time.sleep(self._get_delay)
+        if key in self._dict:
+            val, flags, cas = self._dict[key]
+            command = 'VALUE %s %d %d %d\r\n%s\r\n' % (key, flags, len(val), cas, val)
+            self._socket.sendall(command)
+        self._socket.sendall('END\r\n')
+
+    def _handle_set(self, key, length, flags=0):
         # req  - set <key> <flags> <exptime> <bytes> [noreply]\r\n
         #        <data block>\r\n
         # resp - STORED\r\n (or others)
         val = self._read(length+2)[:-2] # read \r\n then chop it off
-        self._dict[key] = val
+        if key not in self._dict:
+            cas = 0
+        else:
+            cas = self._dict[key][2] + 1
+        self._dict[key] = (val, flags, cas)
+
+        self._socket.sendall('STORED\r\n')
+
+    def _handle_cas(self, key, length, cas, flags=0):
+        # req  - cas <key> <flags> <exptime> <bytes> <cas>[noreply]\r\n
+        #        <data block>\r\n
+        # resp - STORED\r\n or EXISTS\r\n or NOT_FOUND\r\n
+        if key not in self._dict:
+            self._socket.sendall('NOT_FOUND\r\n')
+            return
+        
+        # Check CAS value
+        val, current_flags, current_cas = self._dict[key]
+        if current_cas != cas:
+            self._socket.sendall('EXISTS\r\n')
+            return
+
+        # new CAS value
+        cas += 1
+
+        val = self._read(length+2)[:-2] # read \r\n then chop it off
+
+        self._dict[key] = (val, flags, cas)
+
         self._socket.sendall('STORED\r\n')
 
     def run(self):
@@ -106,8 +147,12 @@ class MockMemcached(object):
                 terms = request.split()
                 if len(terms) == 2 and terms[0] == 'get':
                     self._handle_get(terms[1])
+                elif len(terms) == 2 and terms[0] == 'gets':
+                    self._handle_gets(terms[1])
                 elif len(terms) == 5 and terms[0] == 'set':
-                    self._handle_set(terms[1], int(terms[4]))
+                    self._handle_set(terms[1], int(terms[4]), int(terms[2]))
+                elif len(terms) == 6 and terms[0] == 'cas':
+                    self._handle_cas(terms[1], int(terms[4]), int(terms[5]), int(terms[2]))
                 else:
                     print 'unknown command', repr(request)
                     break

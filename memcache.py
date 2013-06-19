@@ -33,7 +33,7 @@ class ClientException(Exception):
     Raised when the server does something we don't expect
 
     | This does not include `socket errors <http://docs.python.org/library/socket.html#socket.error>`_
-    | Note that ``ValidationException`` subclasses this so, technically, this is raised on any error
+    | Note that ``ValidationException`` and ``CasException`` subclass this so, technically, this is raised on any error
     '''
 
     def __init__(self, msg, item=None):
@@ -48,6 +48,22 @@ class ValidationException(ClientException):
 
     def __init__(self, msg, item):
         super(ValidationException, self).__init__(msg, item)
+
+class CasException(ClientException):
+    '''
+    Raised when a CAS operation has failed, either because the value has been updated since last fetch (why==COLLISION),
+    or because the key does not yet exists (why==NOT_FOUND)
+    '''
+    COLLISION, NOT_FOUND = range(2)
+    def __init__(self, why):
+        self.why = why
+        msg = '%s' % ( self.whyToStr() )
+        super(CasException, self).__init__(msg)
+
+    def whyToStr(self):
+        return [ "Value has been updated since last fetch (CAS COLLISION)",
+                 "Key does not yet exists"
+               ][self.why]
 
 class Client(object):
 
@@ -222,40 +238,55 @@ class Client(object):
         '''
         return self.multi_get([key])[0]
 
+    def gets(self, key):
+        '''
+        Gets a single (value, flag, cas) from the server; returns None if there is no value
+
+        Raises ``ValidationException``, ``ClientException``, and socket errors
+        '''
+        return self.multi_gets([key])[0]
+
     def multi_get(self, keys):
         '''
         Takes a list of keys and returns a list of values
 
         Raises ``ValidationException``, ``ClientException``, and socket errors
         '''
+        return [ value for value, flag, cas in self.multi_gets(keys) ]
+
+    def multi_gets(self, keys):
+        '''
+        Takes a list of keys and returns a list of (value, flag, cas)
+
+        Raises ``ValidationException``, ``ClientException``, and socket errors
+        '''
         if len(keys) == 0:
             return []
 
-        # req  - get <key> [<key> ...]\r\n
-        # resp - VALUE <key> <flags> <bytes> [<cas unique>]\r\n
+        # req  - gets <key> [<key> ...]\r\n
+        # resp - VALUE <key> <flags> <bytes> <cas unique>\r\n
         #        <data block>\r\n (if exists)
         #        [...]
         #        END\r\n
         keys = [self._validate_key(key) for key in keys]
         if len(set(keys)) != len(keys):
             raise ClientException('duplicate keys passed to multi_get')
-        command = 'get %s\r\n' % ' '.join(keys)
+        command = 'gets %s\r\n' % ' '.join(keys)
         received = {}
         resp = self._send_command(command)
         error = None
 
         while resp != 'END\r\n':
             terms = resp.split()
-            if len(terms) == 4 and terms[0] == 'VALUE': # exists
+            if len(terms) == 5 and terms[0] == 'VALUE': # exists
                 key = terms[1]
                 flags = int(terms[2])
                 length = int(terms[3])
-                if flags != 0:
-                    error = ClientException('received non zero flags')
+                cas = int(terms[4])
                 val = self._read(length+2)[:-2]
                 if key in received:
                     error = ClientException('duplicate results from server')
-                received[key] = val
+                received[key] = (val, flags, cas)
             else:
                 raise ClientException('get failed', resp)
             resp = self._read()
@@ -274,7 +305,7 @@ class Client(object):
         if len(keys) == 1 and len(received) == 1:
             response = received.values()
         else:
-            response = [received.get(key) for key in keys]
+            response = [received.get(key,(None,None,None)) for key in keys]
         return response
 
     def set(self, key, val, exptime=0):
@@ -308,6 +339,49 @@ class Client(object):
         command = 'set %s 0 %d %d\r\n%s\r\n' % (key, exptime, len(val), val)
         resp = self._send_command(command)
         if resp != 'STORED\r\n':
+            raise ClientException('set failed', resp)
+
+    def cas(self, key, val, cas, exptime=0):
+        '''
+        Sets a key to a value on the server with an optional exptime (0 means don't auto-expire)
+        Only succeeds if supplied cas value is the same as on the server
+
+        Raises ``ValidationException``, ``ClientException``, and socket errors
+        '''
+        # req  - cas <key> <flags> <exptime> <bytes> <cas> [noreply]\r\n
+        #        <data block>\r\n
+        # resp - STORED\r\n (if OK), EXISTS\r\n (if cas value is outdated), NOT_FOUND\r\n (if key does not exists)
+        key = self._validate_key(key)
+
+        # see set() method for explanation
+        if not isinstance(val, str):
+            raise ValidationException('value must be str', val)
+
+        # typically, if val is > 1024**2 bytes server returns:
+        #   SERVER_ERROR object too large for cache\r\n
+        # however custom-compiled memcached can have different limit
+        # so, we'll let the server decide what's too much
+        if not isinstance(exptime, int):
+            raise ValidationException('exptime not int', exptime)
+        elif exptime < 0:
+            raise ValidationException('exptime negative', exptime)
+
+        # cas value is a 64-bits positive integer
+        if not isinstance(cas, int):
+            raise ValidationException('cas not int', cas)
+        elif cas < 0:
+            raise ValidationException('cas negative', cas)
+
+        command = 'cas %s 0 %d %d %d\r\n%s\r\n' % (key, exptime, len(val), cas, val)
+        resp = self._send_command(command)
+        if resp == 'EXISTS\r\n':
+            # item has been updated on the server since last fetch
+            raise CasException( CasException.COLLISION )
+        elif resp == 'NOT_FOUND\r\n':
+            # item does not exist, you need to use SET instead of CAS
+            raise CasException( CasException.NOT_FOUND )
+        elif resp != 'STORED\r\n':
+            # unexpected error
             raise ClientException('set failed', resp)
 
     def stats(self, additional_args=None):

@@ -154,19 +154,28 @@ class TestClient(unittest.TestCase):
         stats = self.client.stats()
         self.assertTrue('total_items' in stats)
 
-    def test_bad_flags(self):
-        self.client._connect()
-        key = 'badflags'
-        val = 'xcHJFd'
-        command = 'set %s 1 0 %d\r\n%s\r\n' % (key, len(val), val)
-        self.client._socket.sendall(command)
-        rc = self.client._read()
-        self.assertEqual(rc, 'STORED\r\n')
-        self.assertRaises(Exception, self.client.get, key)
-
     def test_str_only(self):
         self.assertRaises(Exception, self.client.set, u'unicode_key', 'sfdhjk')
         self.assertRaises(Exception, self.client.set, 'str_key', u'DFHKfl')
+
+    def test_cas(self):
+        key = 'gets_cas'
+        val = 'mlb'
+        cas = 0
+        # Key not found
+        self.client.delete(key)
+        self.assertRaises(memcache.CasException, self.client.cas, key, val, cas)
+        # Collision : SET command between GETS and CAS
+        self.client.set(key, val)
+        mcval, flags, cas = self.client.gets(key)
+        self.client.set(key, val)
+        self.assertRaises(memcache.CasException, self.client.cas, key, val, cas)
+        # Valid CAS
+        mcval, flags, cas = self.client.gets(key)
+        newval = "aaabbbccc"
+        self.client.cas(key, newval, cas)
+        mcval = self.client.get(key)
+        self.assertEqual(mcval, newval)
 
 # make sure timeout works by using mock server
 # test memcached failing in a variety of ways, coming back vs. not, etc

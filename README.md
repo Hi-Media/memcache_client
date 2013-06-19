@@ -4,7 +4,7 @@ It is an alternative to the de-facto pure python standard client
 The main features are better timeout handling and enforcement of bytestring keys and values.
 
  * Minimal API
-   * Only supports set, get, delete, and stats
+   * Only supports set, get, gets, cas, delete, and stats
    * Client connects to single host -- no sharding over slabs
    * TCP sockets only -- no UDP or UNIX sockets
    * bytestring keys/values only -- no pickling/casting
