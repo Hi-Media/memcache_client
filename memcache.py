@@ -250,8 +250,6 @@ class Client(object):
                 key = terms[1]
                 flags = int(terms[2])
                 length = int(terms[3])
-                if flags != 0:
-                    error = ClientException('received non zero flags')
                 val = self._read(length+2)[:-2]
                 if key in received:
                     error = ClientException('duplicate results from server')
