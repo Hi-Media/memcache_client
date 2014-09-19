@@ -186,7 +186,7 @@ class Client(object):
     # \x21 is !, right after space, and \x7e is -, right before DEL
     # also 1 <= len <= 250 as per the spec
 # !!!!!
-# MLB : on accepte tout caractere UTF8 sauf caractères de controle (\x00 à \x20 ainsi que \x7f)
+# MLB : on accepte tout caractere UTF8 sauf caracteres de controle (\x00 à \x20 ainsi que \x7f)
     _valid_key_re = re.compile('^[^\x00-\x20\x7f]{1,250}$')
 
 
